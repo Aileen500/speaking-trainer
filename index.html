@@ -1,3 +1,28 @@
+// netlify/functions/chat.js
+exports.handler = async (event) => {
+  if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'POST only' };
+  const { messages } = JSON.parse(event.body || '{}');
+  if (!Array.isArray(messages)) return { statusCode: 400, body: 'messages required' };
+  try {
+    const r = await fetch('https://api.moonshot.cn/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.MOONSHOT_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ model: 'kimi-k2.6', messages, temperature: 0.8, max_tokens: 150 })
+    });
+    const data = await r.json();
+    const reply = data.choices?.[0]?.message?.content
+               ?? data.choices?.[0]?.messages?.find(m=>m.role==='assistant')?.content;
+    if (!reply) return { statusCode: 502, body: JSON.stringify(data) };
+    return { statusCode: 200, body: JSON.stringify({ reply }) };
+  } catch (e) {
+    return { statusCode: 500, body: String(e) };
+  }
+};
+
+ view-source: 
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -48,7 +73,7 @@
 
   <div id="home">
     <h1>🛠️ Maker Faire 口语特训营</h1>
-    <p class="sub">12.12–12.13 深圳 · 和外国创客畅聊之前，先来练一把！</p>
+    <p class="sub">12.12–12.13 深圳 · 和外国创客畅聊之前，先来练一把！</p >
     <div id="micWarn" class="warn hidden">⚠️ 语音功能需要 Chrome/Edge 浏览器，并允许麦克风权限</div>
     <div id="levels"></div>
   </div>
@@ -237,7 +262,6 @@ function showGrad(){
   tts("Congratulations! You are ready for Maker Faire!");
 }
 
-/* ============ Boss 关：真 AI 对话（调用 /api/chat，失败回退规则） ============ */
 const SYSTEM_PROMPT = `You are David, a friendly maker from Canada at Maker Faire Shenzhen. You built a cute robot that waves and says hello. You are chatting in English with a Chinese student aged 10-14 who is learning English.
 Rules:
 - Always reply in English, in 1-2 short, simple sentences (like talking to a kid).
@@ -247,7 +271,7 @@ Rules:
 - Ask them a question back to keep the conversation going, but only one question at a time.
 - If they say goodbye, wish them a great Maker Faire.`;
 
-let chatHistory = [];   // {role:'user'|'assistant', content}
+let chatHistory = [];
 let personaFB = 0;
 const FALLBACK = [
   ["Hmm, interesting! Tell me, what do YOU like to make?", "有意思！你喜欢做什么东西呢？"],
@@ -283,9 +307,9 @@ function hint(){
 async function askAI(userText){
   const messages = [{role:'system', content: SYSTEM_PROMPT}, ...chatHistory, {role:'user', content: userText}];
   const ctrl = new AbortController();
-  const timer = setTimeout(()=>ctrl.abort(), 12000); // 12秒超时
+  const timer = setTimeout(()=>ctrl.abort(), 12000);
   try{
-    const r = await fetch('/api/chat', {
+    const r = await fetch('/.netlify/functions/chat', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({messages}),
