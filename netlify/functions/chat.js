@@ -10,12 +10,20 @@ exports.handler = async (event) => {
         'Authorization': `Bearer ${process.env.MOONSHOT_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ model: 'kimi-k2.6', messages, temperature: 0.8, max_tokens: 150 })
+      body: JSON.stringify({
+        model: 'kimi-k3',
+        reasoning_effort: 'low',
+        messages,
+        temperature: 0.8,
+        max_tokens: 300
+      })
     });
-    const data = await r.json();
-    const reply = data.choices?.[0]?.message?.content
-               ?? data.choices?.[0]?.messages?.find(m=>m.role==='assistant')?.content;
-    if (!reply) return { statusCode: 502, body: JSON.stringify(data) };
+    const raw = await r.text();
+    if (!r.ok) return { statusCode: 502, body: 'moonshot '+r.status+': '+raw.slice(0,200) };
+    let data = {};
+    try { data = JSON.parse(raw); } catch(e) {}
+    const reply = data.choices?.[0]?.message?.content ?? null;
+    if (!reply) return { statusCode: 502, body: 'no reply: '+raw.slice(0,200) };
     return { statusCode: 200, body: JSON.stringify({ reply }) };
   } catch (e) {
     return { statusCode: 500, body: String(e) };
