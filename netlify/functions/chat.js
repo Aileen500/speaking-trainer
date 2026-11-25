@@ -14,7 +14,7 @@ exports.handler = async (event) => {
         model: 'kimi-k3',
         reasoning_effort: 'low',
         messages,
-        temperature: 0.8,
+        temperature: 1,
         max_tokens: 300
       })
     });
