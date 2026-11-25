@@ -1,28 +1,3 @@
-// netlify/functions/chat.js
-exports.handler = async (event) => {
-  if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'POST only' };
-  const { messages } = JSON.parse(event.body || '{}');
-  if (!Array.isArray(messages)) return { statusCode: 400, body: 'messages required' };
-  try {
-    const r = await fetch('https://api.moonshot.cn/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.MOONSHOT_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ model: 'kimi-k2.6', messages, temperature: 0.8, max_tokens: 150 })
-    });
-    const data = await r.json();
-    const reply = data.choices?.[0]?.message?.content
-               ?? data.choices?.[0]?.messages?.find(m=>m.role==='assistant')?.content;
-    if (!reply) return { statusCode: 502, body: JSON.stringify(data) };
-    return { statusCode: 200, body: JSON.stringify({ reply }) };
-  } catch (e) {
-    return { statusCode: 500, body: String(e) };
-  }
-};
-
- view-source: 
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -67,13 +42,14 @@ exports.handler = async (event) => {
           border-radius:12px; padding:10px; font-size:13px; margin-bottom:12px; text-align:center; }
   .tag { display:inline-block; font-size:11px; background:#22c55e; border-radius:999px; padding:2px 10px; margin-left:6px; vertical-align:middle; }
 </style>
+<base target="_blank">
 </head>
 <body>
 <div class="wrap">
 
   <div id="home">
     <h1>🛠️ Maker Faire 口语特训营</h1>
-    <p class="sub">12.12–12.13 深圳 · 和外国创客畅聊之前，先来练一把！</p >
+    <p class="sub">12.12–12.13 深圳 · 和外国创客畅聊之前，先来练一把！</p>
     <div id="micWarn" class="warn hidden">⚠️ 语音功能需要 Chrome/Edge 浏览器，并允许麦克风权限</div>
     <div id="levels"></div>
   </div>
@@ -188,17 +164,39 @@ function renderHome(){
 }
 function goHome(){ ['home','drill','chat','grad'].forEach(i=>document.getElementById(i).classList.add('hidden')); document.getElementById('home').classList.remove('hidden'); renderHome(); }
 
+let ttsToken = 0, ttsTimer = null;
 function tts(text, rate){
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang='en-US'; u.rate = rate||0.85; u.pitch=1.05;
-  speechSynthesis.cancel(); speechSynthesis.speak(u);
+  const my = ++ttsToken;
+  speechSynthesis.cancel();
+  if(ttsTimer){ clearInterval(ttsTimer); ttsTimer = null; }
+  const chunks = text.match(/[^.!?]+[.!?]+/g) || [text];
+  let i = 0;
+  const speakNext = () => {
+    if(my !== ttsToken) return;
+    if(i >= chunks.length) return;
+    const u = new SpeechSynthesisUtterance(chunks[i++].trim());
+    u.lang='en-US'; u.rate = rate||0.85; u.pitch=1.05;
+    u.onend = speakNext;
+    speechSynthesis.speak(u);
+  };
+  speakNext();
+  // Chrome 移动端长句截断的保险机制
+  ttsTimer = setInterval(()=>{ if(speechSynthesis.speaking){ speechSynthesis.pause(); speechSynthesis.resume(); } }, 10000);
 }
-function listen(cb){
+function listen(cb, attempt){
+  attempt = attempt || 0;
   if(!SR){ alert('请使用 Chrome/Edge 浏览器并允许麦克风'); return; }
+  let got = false, fin = false;
   const r = new SR();
   r.lang='en-US'; r.interimResults=false; r.maxAlternatives=1;
-  r.onresult = e=> cb(e.results[0][0].transcript);
-  r.onerror = ()=> cb(null);
+  const fail = ()=>{
+    if(fin) return; fin = true;
+    if(attempt < 1) setTimeout(()=>listen(cb, attempt+1), 500);
+    else cb(null);
+  };
+  r.onresult = e=>{ got = true; fin = true; cb(e.results[0][0].transcript); };
+  r.onerror = fail;
+  r.onend = ()=>{ if(!got) fail(); };
   r.start();
   return r;
 }
@@ -262,6 +260,7 @@ function showGrad(){
   tts("Congratulations! You are ready for Maker Faire!");
 }
 
+/* ============ Boss 关：真 AI 对话（调用 /api/chat，失败回退规则） ============ */
 const SYSTEM_PROMPT = `You are David, a friendly maker from Canada at Maker Faire Shenzhen. You built a cute robot that waves and says hello. You are chatting in English with a Chinese student aged 10-14 who is learning English.
 Rules:
 - Always reply in English, in 1-2 short, simple sentences (like talking to a kid).
@@ -271,7 +270,7 @@ Rules:
 - Ask them a question back to keep the conversation going, but only one question at a time.
 - If they say goodbye, wish them a great Maker Faire.`;
 
-let chatHistory = [];
+let chatHistory = [];   // {role:'user'|'assistant', content}
 let personaFB = 0;
 const FALLBACK = [
   ["Hmm, interesting! Tell me, what do YOU like to make?", "有意思！你喜欢做什么东西呢？"],
@@ -307,7 +306,7 @@ function hint(){
 async function askAI(userText){
   const messages = [{role:'system', content: SYSTEM_PROMPT}, ...chatHistory, {role:'user', content: userText}];
   const ctrl = new AbortController();
-  const timer = setTimeout(()=>ctrl.abort(), 12000);
+  const timer = setTimeout(()=>ctrl.abort(), 20000);
   try{
     const r = await fetch('/.netlify/functions/chat', {
       method:'POST',
@@ -316,10 +315,13 @@ async function askAI(userText){
       signal: ctrl.signal
     });
     clearTimeout(timer);
-    if(!r.ok) return null;
-    const data = await r.json();
-    return data.reply || null;
-  }catch(e){ clearTimeout(timer); return null; }
+    const raw = await r.text();
+    if(!r.ok) return {reply:null, err:'服务器'+r.status+': '+raw.slice(0,100)};
+    let data = {};
+    try{ data = JSON.parse(raw); }catch(e){}
+    if(data.reply) return {reply: data.reply};
+    return {reply:null, err: raw.slice(0,100)};
+  }catch(e){ clearTimeout(timer); return {reply:null, err:'网络超时'}; }
 }
 
 function fallbackReply(said){
@@ -335,9 +337,9 @@ function talk(){
     if(!said){ fb.textContent='没听清，再试一次～'; fb.className='feedback bad'; return; }
     addMsg('me', said);
     fb.textContent='🤖 David 思考中...'; fb.className='feedback mid';
-    const reply = await askAI(said);
-    const finalReply = reply || fallbackReply(said);
-    if(!reply) fb.textContent='（AI 暂时没连上，用了备用回答）'; else fb.textContent='';
+    const res = await askAI(said);
+    const finalReply = res.reply || fallbackReply(said);
+    if(!res.reply) fb.textContent='（AI 没连上：'+(res.err||'未知原因')+'）'; else fb.textContent='';
     chatHistory.push({role:'user', content: said});
     chatHistory.push({role:'assistant', content: finalReply});
     if(chatHistory.length > 20) chatHistory = chatHistory.slice(-20);
